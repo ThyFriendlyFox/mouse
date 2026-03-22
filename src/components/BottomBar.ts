@@ -1,10 +1,15 @@
+import { SpeechRecognition } from '@capacitor-community/speech-recognition'
+
+const isNative = () => !!(window as any).Capacitor?.isNativePlatform?.()
+
 export class BottomBar {
   el: HTMLElement
   private inputEl!: HTMLTextAreaElement
   private micBtn!: HTMLButtonElement
   private onSubmitFn?: (text: string) => void
   private onSignOutFn?: () => void
-  private recognition: any = null
+  private webRecognition: any = null
+  private listening = false
   private codespaceName: string
 
   constructor(codespaceName = '') {
@@ -12,7 +17,7 @@ export class BottomBar {
     this.el = document.createElement('div')
     this.el.className = 'bottom-bar'
     this.render()
-    this.setupSpeech()
+    if (!isNative()) this.setupWebSpeech()
   }
 
   onSubmit(fn: (text: string) => void) { this.onSubmitFn = fn }
@@ -49,7 +54,6 @@ export class BottomBar {
     csSel.innerHTML = `<span>opencode</span><span class="composer-chev">▾</span>`
     if (this.codespaceName) {
       csSel.title = this.codespaceName
-      // Long-press → sign out
       let pressTimer: ReturnType<typeof setTimeout> | null = null
       csSel.addEventListener('touchstart', () => { pressTimer = setTimeout(() => this.onSignOutFn?.(), 800) })
       csSel.addEventListener('touchend', () => { if (pressTimer) clearTimeout(pressTimer) })
@@ -65,7 +69,7 @@ export class BottomBar {
     this.micBtn = document.createElement('button')
     this.micBtn.className = 'mic-btn'
     this.micBtn.innerHTML = '🎙'
-    this.micBtn.title = 'Voice input (hold)'
+    this.micBtn.title = 'Voice input'
     this.micBtn.addEventListener('click', () => this.toggleMic())
 
     this.el.appendChild(composer)
@@ -80,34 +84,76 @@ export class BottomBar {
     this.inputEl.style.height = 'auto'
   }
 
-  private setupSpeech() {
-    const SR = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition
-    if (!SR) return
-    this.recognition = new SR()
-    this.recognition.continuous = false
-    this.recognition.interimResults = false
-    this.recognition.lang = 'en-US'
-    this.recognition.onresult = (e: any) => {
-      const transcript = e.results[0][0].transcript
-      this.inputEl.value = transcript
-      this.micBtn.classList.remove('listening')
-      this.submit()
-    }
-    this.recognition.onend = () => this.micBtn.classList.remove('listening')
+  // ── Native (iOS / Android) ──────────────────────────
+
+  private async startNative() {
+    const { available } = await SpeechRecognition.available()
+    if (!available) { alert('Speech recognition not available on this device.'); return }
+
+    await SpeechRecognition.requestPermissions()
+
+    this.setListening(true)
+    await SpeechRecognition.start({
+      language: 'en-US',
+      maxResults: 1,
+      popup: false,
+    })
+
+    SpeechRecognition.addListener('partialResults', (data: { matches: string[] }) => {
+      if (data.matches?.[0]) this.inputEl.value = data.matches[0]
+    })
   }
 
-  private toggleMic() {
-    if (!this.recognition) {
-      alert('Speech recognition not available in this environment.')
+  private async stopNative() {
+    await SpeechRecognition.stop()
+    SpeechRecognition.removeAllListeners()
+    const text = this.inputEl.value.trim()
+    this.setListening(false)
+    if (text) this.submit()
+  }
+
+  // ── Web Speech API (Electron / desktop) ────────────
+
+  private setupWebSpeech() {
+    const SR = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition
+    if (!SR) return
+    this.webRecognition = new SR()
+    this.webRecognition.continuous = false
+    this.webRecognition.interimResults = true
+    this.webRecognition.lang = 'en-US'
+    this.webRecognition.onresult = (e: any) => {
+      const transcript = Array.from(e.results as any[])
+        .map((r: any) => r[0].transcript)
+        .join('')
+      this.inputEl.value = transcript
+      if (e.results[e.results.length - 1].isFinal) {
+        this.setListening(false)
+        this.submit()
+      }
+    }
+    this.webRecognition.onend = () => this.setListening(false)
+  }
+
+  // ── Toggle ──────────────────────────────────────────
+
+  private async toggleMic() {
+    if (this.listening) {
+      isNative() ? await this.stopNative() : this.webRecognition?.stop()
       return
     }
-    if (this.micBtn.classList.contains('listening')) {
-      this.recognition.stop()
-      this.micBtn.classList.remove('listening')
+    if (isNative()) {
+      await this.startNative()
+    } else if (this.webRecognition) {
+      this.setListening(true)
+      this.webRecognition.start()
     } else {
-      this.recognition.start()
-      this.micBtn.classList.add('listening')
+      alert('Speech recognition not available in this environment.')
     }
+  }
+
+  private setListening(on: boolean) {
+    this.listening = on
+    this.micBtn.classList.toggle('listening', on)
   }
 
   focusInput() { this.inputEl.focus() }
