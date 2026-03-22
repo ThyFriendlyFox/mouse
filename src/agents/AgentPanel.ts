@@ -4,7 +4,7 @@ export class AgentPanel {
   el: HTMLElement
   private agents: Agent[] = []
   private expandedId: string | null = null
-  private barEls = new Map<string, HTMLElement>()
+  private rowEls = new Map<string, HTMLElement>()
 
   constructor() {
     this.el = document.createElement('div')
@@ -13,102 +13,119 @@ export class AgentPanel {
 
   addAgent(agent: Agent) {
     this.agents.push(agent)
-    const bar = this.makeBar(agent)
-    this.barEls.set(agent.id, bar)
-    this.el.appendChild(bar)
-    agent.onChange(() => this.updateBar(agent))
+    const row = this.makeRow(agent)
+    this.rowEls.set(agent.id, row)
+    this.el.appendChild(row)
+    agent.onChange(() => this.updateRow(agent))
   }
 
   get count() { return this.agents.length }
 
-  private makeBar(agent: Agent): HTMLElement {
-    const bar = document.createElement('div')
-    bar.className = 'agent-bar'
-    bar.dataset.id = agent.id
+  private makeRow(agent: Agent): HTMLElement {
+    const row = document.createElement('div')
+    row.className = 'agent-row'
+    row.dataset.id = agent.id
 
-    const hdr = document.createElement('div')
-    hdr.className = 'agent-bar-hdr'
-    hdr.innerHTML = `
-      <div class="agent-dot ${agent.status}"></div>
-      <span class="agent-name">${agent.name}</span>
-      <span class="agent-status-text">${this.statusLabel(agent)}</span>
-      <span class="agent-chevron">›</span>
-    `
+    row.innerHTML = this.rowHTML(agent)
 
-    const body = document.createElement('div')
-    body.className = 'agent-body'
-
-    bar.appendChild(hdr)
-    bar.appendChild(body)
-
-    hdr.addEventListener('click', () => {
-      const isExpanded = bar.classList.contains('expanded')
-      this.el.querySelectorAll('.agent-bar').forEach(b => b.classList.remove('expanded'))
+    row.addEventListener('click', () => {
+      const isExpanded = row.classList.contains('expanded')
+      this.el.querySelectorAll('.agent-row').forEach(r => r.classList.remove('expanded'))
       if (!isExpanded) {
-        bar.classList.add('expanded')
+        row.classList.add('expanded')
         this.expandedId = agent.id
       } else {
         this.expandedId = null
       }
-      this.updateChevrons()
     })
 
-    return bar
+    return row
   }
 
-  private updateBar(agent: Agent) {
-    const bar = this.barEls.get(agent.id)
-    if (!bar) return
+  private rowHTML(agent: Agent): string {
+    const iconClass = this.iconClass(agent)
+    const subtitle  = this.subtitle(agent)
+    const elapsed   = this.elapsedLabel(agent)
+    const body      = this.bodyHTML(agent)
+    const task      = agent.task || agent.name
 
-    bar.querySelector<HTMLElement>('.agent-dot')!.className = `agent-dot ${agent.status}`
-    bar.querySelector<HTMLElement>('.agent-status-text')!.textContent = this.statusLabel(agent)
+    return `
+      <div class="agent-row-main">
+        <div class="agent-icon ${iconClass}"></div>
+        <div class="agent-row-text">
+          <div class="agent-task-title">${escHtml(task)}</div>
+          <div class="agent-subtitle">${escHtml(subtitle)}</div>
+        </div>
+        <div class="agent-elapsed">${elapsed}</div>
+      </div>
+      <div class="agent-detail">${body}</div>
+    `
+  }
 
-    const body = bar.querySelector<HTMLElement>('.agent-body')!
-    body.innerHTML = this.renderBody(agent)
+  private updateRow(agent: Agent) {
+    const row = this.rowEls.get(agent.id)
+    if (!row) return
+
+    const wasExpanded = row.classList.contains('expanded')
+
+    row.innerHTML = this.rowHTML(agent)
+    if (wasExpanded) row.classList.add('expanded')
+
+    // Re-attach click
+    row.addEventListener('click', () => {
+      const isExpanded = row.classList.contains('expanded')
+      this.el.querySelectorAll('.agent-row').forEach(r => r.classList.remove('expanded'))
+      if (!isExpanded) {
+        row.classList.add('expanded')
+        this.expandedId = agent.id
+      } else {
+        this.expandedId = null
+      }
+    })
 
     // Wire answer buttons
     if (agent.status === 'waiting') {
-      body.querySelector('#yes-btn')?.addEventListener('click', (e) => {
+      row.querySelector('.agent-answer-btn.yes')?.addEventListener('click', (e) => {
         e.stopPropagation()
-        agent.answer(true)
+        agent.answer('y')
       })
-      body.querySelector('#no-btn')?.addEventListener('click', (e) => {
+      row.querySelector('.agent-answer-btn.no')?.addEventListener('click', (e) => {
         e.stopPropagation()
-        agent.answer(false)
+        agent.answer('n')
       })
     }
 
-    // Auto-expand while active
+    // Auto-expand newly-active agent
     if ((agent.status === 'running' || agent.status === 'thinking' || agent.status === 'waiting')
         && this.expandedId === null) {
-      bar.classList.add('expanded')
+      row.classList.add('expanded')
       this.expandedId = agent.id
-      this.updateChevrons()
     }
 
-    // Scroll body to bottom
-    body.scrollTop = body.scrollHeight
+    // Scroll detail to bottom
+    const detail = row.querySelector<HTMLElement>('.agent-detail')
+    if (detail) detail.scrollTop = detail.scrollHeight
   }
 
-  private renderBody(agent: Agent): string {
+  private bodyHTML(agent: Agent): string {
     return agent.messages.map(m => {
       switch (m.type) {
         case 'prompt':
-          return `<div class="agent-prompt">${m.text}</div>`
+          return `<div class="agent-prompt">${escHtml(m.text)}</div>`
         case 'thinking':
-          return `<div class="agent-msg thinking"><span class="agent-think-dot"></span>${m.text}</div>`
+          return `<div class="agent-msg thinking"><span class="agent-think-dot"></span>${escHtml(m.text)}</div>`
         case 'action':
-          return `<div class="agent-action">${m.text}</div>`
+          return `<div class="agent-action">${escHtml(m.text)}</div>`
         case 'output':
-          return `<div class="agent-msg">${m.text}</div>`
+          return `<div class="agent-msg">${escHtml(m.text)}</div>`
         case 'question':
           return `
             <div class="agent-question">
-              <p>${m.text}</p>
+              <p>${escHtml(m.text)}</p>
               ${agent.status === 'waiting' ? `
                 <div class="agent-answer-btns">
-                  <button class="agent-answer-btn yes" id="yes-btn">Yes</button>
-                  <button class="agent-answer-btn no" id="no-btn">No</button>
+                  <button class="agent-answer-btn yes">Yes</button>
+                  <button class="agent-answer-btn no">No</button>
                 </div>
               ` : ''}
             </div>
@@ -119,20 +136,40 @@ export class AgentPanel {
     }).join('')
   }
 
-  private updateChevrons() {
-    this.el.querySelectorAll('.agent-bar').forEach(bar => {
-      const chevron = bar.querySelector<HTMLElement>('.agent-chevron')
-      if (chevron) chevron.style.transform = bar.classList.contains('expanded') ? 'rotate(90deg)' : ''
-    })
+  private iconClass(agent: Agent): string {
+    switch (agent.status) {
+      case 'running':
+      case 'thinking': return 'spinning'
+      case 'waiting':  return 'waiting'
+      case 'done':     return 'done'
+      case 'error':    return 'error'
+      default:         return 'idle'
+    }
   }
 
-  private statusLabel(agent: Agent): string {
+  private subtitle(agent: Agent): string {
+    const last = agent.messages.at(-1)
+    if (last && (last.type === 'thinking' || last.type === 'action' || last.type === 'output')) {
+      return last.text.slice(0, 80)
+    }
     switch (agent.status) {
       case 'running':  return 'Running...'
       case 'thinking': return 'Thinking...'
       case 'waiting':  return 'Waiting for input'
       case 'done':     return 'Done'
-      default:         return 'Idle'
+      case 'error':    return 'Error'
+      default:         return 'Starting...'
     }
   }
+
+  private elapsedLabel(agent: Agent): string {
+    const secs = Math.floor((Date.now() - agent.startedAt.getTime()) / 1000)
+    if (secs < 10) return 'Now'
+    if (secs < 60) return `${secs}s`
+    return `${Math.floor(secs / 60)}m`
+  }
+}
+
+function escHtml(s: string): string {
+  return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
 }

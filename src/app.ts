@@ -1,5 +1,4 @@
 import { ModuleStack } from './modules/ModuleStack.ts'
-import { AgentPanel } from './agents/AgentPanel.ts'
 import { Agent } from './agents/Agent.ts'
 import { BottomBar } from './components/BottomBar.ts'
 import { AuthGate } from './auth/AuthGate.ts'
@@ -11,6 +10,7 @@ import type { PickResult } from './codespaces/CodespacePicker.ts'
 export class App {
   el: HTMLElement
   private relay: RelaySocket | null = null
+  private agentCount = 0
 
   constructor(container: HTMLElement) {
     this.el = document.createElement('div')
@@ -21,17 +21,9 @@ export class App {
 
   private async boot() {
     const token = getStoredToken()
-    if (!token) {
-      this.showAuth()
-      return
-    }
-    // Validate existing token
+    if (!token) { this.showAuth(); return }
     const valid = await validateToken(token)
-    if (!valid) {
-      clearAuth()
-      this.showAuth()
-      return
-    }
+    if (!valid) { clearAuth(); this.showAuth(); return }
     this.showCodespacePicker(token)
   }
 
@@ -55,43 +47,51 @@ export class App {
 
   private showMain(result: PickResult) {
     const { token, relayUrl, codespace } = result
+    const codespaceName = codespace.display_name ?? codespace.name
 
-    const stack = new ModuleStack()
-    const agentPanel = new AgentPanel()
-    const bottomBar = new BottomBar(codespace.display_name ?? codespace.name)
+    const stack     = new ModuleStack()
+    const bottomBar = new BottomBar(codespaceName)
 
-    // Connect relay
+    this.el.appendChild(stack.el)
+    this.el.appendChild(bottomBar.el)
+
+    // ── Connect relay ──────────────────────────────────
     this.relay = new RelaySocket(relayUrl, token)
-    stack.setRelay(this.relay)
 
-    // Wire composer → relay (types message into opencode running in PTY)
-    bottomBar.onSubmit(text => {
-      if (this.relay?.status === 'connected') {
-        this.relay.sendMessage(text)
-      } else {
-        // Relay not connected: run as local agent simulation
-        const agent = new Agent(`Agent ${Date.now()}`)
-        agentPanel.addAgent(agent)
-        agent.simulate(text)
+    this.relay.onStatus(status => {
+      if (status === 'connected') {
+        this.relay!.startSession('terminal', 'bash')
+        this.relay!.onSessionStarted('terminal', () => {
+          stack.connectTerminal(this.relay!, 'terminal', 'Terminal')
+        })
+        this.toast(`Connected to ${codespaceName}`)
       }
+      if (status === 'disconnected') this.toast('Terminal disconnected')
+      if (status === 'error')        this.toast('Connection error — is the relay running?')
     })
 
-    // Sign-out option (long-press bottom bar logo)
+    this.relay.connect()
+
+    // ── Composer → new agent module in the stack ──────
+    bottomBar.onSubmit(text => {
+      if (!this.relay || this.relay.status !== 'connected') {
+        this.toast('Not connected to a Codespace')
+        return
+      }
+      this.agentCount++
+      const agentId   = `agent-${this.agentCount}`
+      const agentName = `Agent ${this.agentCount}`
+      const agent     = new Agent(agentId, agentName, this.relay)
+
+      stack.addAgent(agent, this.relay)
+      agent.start(text)
+    })
+
     bottomBar.onSignOut(() => {
       this.relay?.disconnect()
       clearAuth()
       this.el.innerHTML = ''
       this.boot()
-    })
-
-    this.el.appendChild(stack.el)
-    this.el.appendChild(agentPanel.el)
-    this.el.appendChild(bottomBar.el)
-
-    // Show connection status in a transient toast
-    this.relay.onStatus(status => {
-      if (status === 'connected') this.toast(`Connected to ${codespace.display_name ?? codespace.name}`)
-      if (status === 'disconnected') this.toast('Terminal disconnected')
     })
   }
 
@@ -101,6 +101,9 @@ export class App {
     t.textContent = msg
     this.el.appendChild(t)
     setTimeout(() => t.classList.add('toast-show'), 10)
-    setTimeout(() => { t.classList.remove('toast-show'); setTimeout(() => t.remove(), 300) }, 2500)
+    setTimeout(() => {
+      t.classList.remove('toast-show')
+      setTimeout(() => t.remove(), 300)
+    }, 2500)
   }
 }

@@ -1,24 +1,41 @@
-export type AgentStatus = 'idle' | 'running' | 'thinking' | 'done' | 'waiting'
+import type { RelaySocket } from '../terminal/RelaySocket.ts'
+
+export type AgentStatus = 'idle' | 'running' | 'thinking' | 'waiting' | 'done' | 'error'
 
 export interface AgentMsg {
   type: 'thinking' | 'action' | 'output' | 'question' | 'prompt'
   text: string
 }
 
+// Strip ANSI escape codes from terminal output
+const ANSI_RE = /\x1b\[[0-9;]*[A-Za-z]|\x1b[^[]/g
+function stripAnsi(s: string) { return s.replace(ANSI_RE, '') }
+
+// opencode output patterns
+const PAT_THINKING = /thinking|processing|analyzing|⠋|⠙|⠹|⠸|⠼|⠴|⠦|⠧|⠇|⠏/i
+const PAT_ACTION   = /^>\s|^running:|^reading |^writing |^editing |^searching |^bash\(|^tool:/i
+const PAT_WAITING  = /\?\s*$|\[y\/n\]|\[Y\/n\]|\[y\/N\]/i
+const PAT_DONE     = /task complete|done\.|all done|finished/i
+
 export class Agent {
   id: string
   name: string
-  status: AgentStatus
-  messages: AgentMsg[]
+  task = ''
+  status: AgentStatus = 'idle'
+  messages: AgentMsg[] = []
   cwd: string
-  private listeners: (() => void)[] = []
+  startedAt: Date = new Date()
 
-  constructor(name: string, cwd = '~/project') {
-    this.id = Math.random().toString(36).slice(2)
+  private relay: RelaySocket
+  private listeners: (() => void)[] = []
+  private unsubs: (() => void)[] = []
+  private lineBuffer: string[] = []
+
+  constructor(id: string, name: string, relay: RelaySocket, cwd = '~/project') {
+    this.id = id
     this.name = name
+    this.relay = relay
     this.cwd = cwd
-    this.status = 'idle'
-    this.messages = []
   }
 
   onChange(fn: () => void) { this.listeners.push(fn) }
@@ -26,51 +43,117 @@ export class Agent {
 
   push(msg: AgentMsg) { this.messages.push(msg); this.notify() }
 
-  async simulate(task: string) {
-    const keyword = task.split(' ').at(-1) ?? task
-
+  start(task: string) {
+    this.task = task
+    this.startedAt = new Date()
     this.status = 'running'
     this.messages = []
-    this.push({ type: 'prompt', text: `(base) user@codespace:${this.cwd} %` })
+    this.lineBuffer = []
+    this.push({ type: 'prompt', text: `user@codespace:${this.cwd} % opencode` })
     this.notify()
 
-    await delay(600)
-    this.status = 'thinking'
-    this.push({ type: 'thinking', text: 'Thinking...' })
+    // Ask relay to start an opencode session
+    this.relay.startSession(this.id, 'opencode', task)
 
-    await delay(900)
-    this.push({ type: 'action', text: `> Grepped codebase for "${keyword}"` })
+    // Subscribe to output
+    const unsubData = this.relay.onSessionData(this.id, (data) => this.onData(data))
+    const unsubExit = this.relay.onSessionExit(this.id, (code) => this.onExit(code))
+    this.unsubs.push(unsubData, unsubExit)
+  }
 
-    await delay(700)
-    this.push({ type: 'action', text: `> Reading src/modules/Module.ts` })
-
-    await delay(500)
+  /** Send a reply to opencode (e.g. answering y/n) */
+  answer(text: string) {
+    if (this.status !== 'waiting') return
     this.status = 'running'
-    this.push({ type: 'output', text: `Found 3 matches. Analyzing context...` })
-
-    await delay(1000)
-    this.status = 'waiting'
-    this.push({
-      type: 'question',
-      text: `I searched the codebase for "${keyword}" and found relevant code. Nothing on the internet yet — want me to search there too?`,
-    })
+    this.relay.sendInput(this.id, text + '\r')
     this.notify()
   }
 
-  answer(yes: boolean) {
-    if (this.status !== 'waiting') return
-    if (yes) {
-      this.status = 'running'
-      this.push({ type: 'thinking', text: 'Searching the internet...' })
-      delay(1500).then(() => {
-        this.push({ type: 'output', text: 'Found 2 relevant results. Applying changes...' })
-        delay(1000).then(() => { this.status = 'done'; this.notify() })
-      })
-    } else {
+  stop() {
+    this.relay.killSession(this.id)
+    this.unsubs.forEach(fn => fn())
+    this.unsubs = []
+    this.status = 'done'
+    this.notify()
+  }
+
+  // ── Output parser ────────────────────────────────────
+
+  private pending = ''
+
+  private onData(raw: string) {
+    // Accumulate into line buffer, handling \r overwrites
+    this.pending += raw
+    const parts = this.pending.split(/\n/)
+    this.pending = parts.pop() ?? ''
+
+    for (const part of parts) {
+      // Handle carriage return (line overwrite)
+      const segments = part.split('\r')
+      const line = stripAnsi(segments.at(-1) ?? '').trim()
+      if (line) this.processLine(line)
+    }
+  }
+
+  private processLine(line: string) {
+    this.lineBuffer.push(line)
+    if (this.lineBuffer.length > 300) this.lineBuffer.shift()
+
+    // Detect status transitions
+    if (PAT_WAITING.test(line)) {
+      if (this.status !== 'waiting') {
+        this.status = 'waiting'
+        // Replace last thinking msg or push question
+        const last = this.messages.at(-1)
+        if (last?.type === 'thinking') {
+          last.type = 'question'
+          last.text = line
+        } else {
+          this.push({ type: 'question', text: line })
+        }
+        this.notify()
+        return
+      }
+    } else if (PAT_DONE.test(line)) {
       this.status = 'done'
+      this.push({ type: 'output', text: line })
+      this.notify()
+      return
+    } else if (PAT_ACTION.test(line)) {
+      this.status = 'running'
+      this.push({ type: 'action', text: line })
+      this.notify()
+      return
+    } else if (PAT_THINKING.test(line)) {
+      this.status = 'thinking'
+      // Update existing thinking message in place rather than adding duplicates
+      const last = this.messages.at(-1)
+      if (last?.type === 'thinking') {
+        last.text = line
+      } else {
+        this.push({ type: 'thinking', text: line })
+      }
+      this.notify()
+      return
+    }
+
+    // Plain output — only push non-empty meaningful lines
+    if (line.length > 2 && this.status !== 'idle') {
+      const last = this.messages.at(-1)
+      if (last?.type === 'output' && this.messages.length > 2) {
+        // Coalesce consecutive output lines to avoid flooding the panel
+        last.text = line
+      } else {
+        this.push({ type: 'output', text: line })
+      }
       this.notify()
     }
   }
-}
 
-function delay(ms: number) { return new Promise(r => setTimeout(r, ms)) }
+  private onExit(code: number | null) {
+    this.unsubs.forEach(fn => fn())
+    this.unsubs = []
+    this.status = code === 0 ? 'done' : 'error'
+    this.notify()
+  }
+}

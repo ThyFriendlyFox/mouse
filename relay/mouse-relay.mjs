@@ -1,139 +1,166 @@
 #!/usr/bin/env node
 /**
- * Mouse Relay — WebSocket PTY bridge for GitHub Codespaces
+ * Mouse Relay — multiplexed WebSocket PTY bridge for GitHub Codespaces
  *
- * Runs inside your Codespace. Exposes a WebSocket server on PORT (default 2222).
- * GitHub Codespaces automatically forwards this port to:
- *   wss://{codespace-name}-2222.app.github.dev
+ * One WebSocket connection per user. Multiple named PTY sessions over it.
  *
- * Protocol:
- *   Client → Server (first message):  { "type": "auth", "token": "<github_token>" }
- *   Server → Client (on auth ok):     { "type": "auth_ok" }
- *   Server → Client (on auth fail):   { "type": "auth_fail" }
- *   After auth:
- *     Client → Server: raw binary PTY input (keyboard data)
- *     Server → Client: raw binary PTY output (terminal data)
- *     Client → Server (text): { "type": "resize", "cols": N, "rows": N }
+ * Protocol (all frames are JSON text):
+ *   C→S  { type:"auth",          token }
+ *   S→C  { type:"auth_ok" }  |  { type:"auth_fail", reason }
+ *
+ *   C→S  { type:"start_session", id, command:"bash"|"opencode", task? }
+ *   S→C  { type:"session_started", id }
+ *
+ *   C→S  { type:"input",         id, data }
+ *   S→C  { type:"output",        id, data }
+ *
+ *   C→S  { type:"resize",        id, cols, rows }
+ *   C→S  { type:"kill_session",  id }
+ *   S→C  { type:"session_exit",  id, code }
+ *
+ *   S→C  { type:"error",         message }
+ *
+ * Health check: GET /health → 200 { ok:true }
  */
 
 import { createServer } from 'http'
 import { WebSocketServer } from 'ws'
 import pty from 'node-pty'
 
-const PORT = parseInt(process.env.MOUSE_RELAY_PORT ?? '2222', 10)
+const PORT  = parseInt(process.env.MOUSE_RELAY_PORT ?? '2222', 10)
 const SHELL = process.env.SHELL ?? '/bin/bash'
-const AUTO_START_OPENCODE = process.env.MOUSE_AUTO_OPENCODE !== '0'
 
+// ── HTTP server (health check + WS upgrade) ────────────
 const server = createServer((req, res) => {
   if (req.url === '/health') {
     res.writeHead(200, { 'Content-Type': 'application/json' })
-    res.end(JSON.stringify({ ok: true, version: '0.1.0' }))
+    res.end(JSON.stringify({ ok: true, version: '0.2.0' }))
     return
   }
-  res.writeHead(404)
-  res.end()
+  res.writeHead(404); res.end()
 })
 
 const wss = new WebSocketServer({ server })
 
 wss.on('connection', (ws) => {
-  let authenticated = false
-  let ptyProcess = null
+  /** @type {Map<string, import('node-pty').IPty>} */
+  const sessions = new Map()
 
-  // --- Auth handshake ---
+  const send  = (obj) => { try { ws.send(JSON.stringify(obj)) } catch {} }
+  const error = (msg) => send({ type: 'error', message: msg })
+
+  // ── Auth handshake ──────────────────────────────────
   ws.once('message', async (raw) => {
     let msg
     try { msg = JSON.parse(raw.toString()) } catch { ws.close(); return }
 
     if (msg.type !== 'auth' || !msg.token) {
-      ws.send(JSON.stringify({ type: 'auth_fail', reason: 'missing token' }))
-      ws.close()
-      return
+      send({ type: 'auth_fail', reason: 'missing token' }); ws.close(); return
     }
 
-    // Validate token against GitHub API
     try {
-      const resp = await fetch('https://api.github.com/user', {
-        headers: { 'Authorization': `Bearer ${msg.token}`, 'Accept': 'application/vnd.github+json' },
+      const r = await fetch('https://api.github.com/user', {
+        headers: { Authorization: `Bearer ${msg.token}`, Accept: 'application/vnd.github+json' },
       })
-      if (!resp.ok) throw new Error('invalid')
-      const user = await resp.json()
-      console.log(`[mouse-relay] Authenticated: ${user.login}`)
+      if (!r.ok) throw new Error('invalid')
+      const user = await r.json()
+      console.log(`[relay] Authenticated: ${user.login}`)
     } catch {
-      ws.send(JSON.stringify({ type: 'auth_fail', reason: 'invalid token' }))
-      ws.close()
-      return
+      send({ type: 'auth_fail', reason: 'invalid token' }); ws.close(); return
     }
 
-    authenticated = true
-    ws.send(JSON.stringify({ type: 'auth_ok' }))
+    send({ type: 'auth_ok' })
 
-    // Spawn PTY
-    ptyProcess = pty.spawn(SHELL, ['-l'], {
-      name: 'xterm-256color',
-      cols: 220,
-      rows: 50,
-      cwd: process.env.HOME ?? '/workspaces',
-      env: { ...process.env, TERM: 'xterm-256color' },
-    })
+    // ── Route subsequent messages ─────────────────────
+    ws.on('message', (raw) => {
+      let msg
+      try { msg = JSON.parse(raw.toString()) } catch { return }
 
-    ptyProcess.onData((data) => {
-      if (ws.readyState === ws.OPEN) ws.send(data)
-    })
-
-    ptyProcess.onExit(() => {
-      console.log('[mouse-relay] PTY exited')
-      ws.close()
-    })
-
-    // Auto-start opencode if available
-    if (AUTO_START_OPENCODE) {
-      setTimeout(() => {
-        try {
-          ptyProcess?.write('opencode\r')
-        } catch {}
-      }, 500)
-    }
-
-    // Wire subsequent messages to PTY
-    ws.on('message', (data) => {
-      if (!authenticated || !ptyProcess) return
-      if (typeof data === 'string') {
-        // Control messages (resize)
-        try {
-          const ctrl = JSON.parse(data)
-          if (ctrl.type === 'resize' && ctrl.cols && ctrl.rows) {
-            ptyProcess.resize(Math.max(10, ctrl.cols), Math.max(2, ctrl.rows))
-          }
-        } catch {
-          ptyProcess.write(data)
-        }
-      } else {
-        // Binary keyboard input
-        ptyProcess.write(data.toString())
+      switch (msg.type) {
+        case 'start_session': startSession(msg);   break
+        case 'input':         handleInput(msg);    break
+        case 'resize':        handleResize(msg);   break
+        case 'kill_session':  killSession(msg.id); break
       }
     })
   })
 
-  ws.on('close', () => {
-    if (ptyProcess) {
-      try { ptyProcess.kill() } catch {}
-      ptyProcess = null
+  // ── Session management ──────────────────────────────
+  function startSession({ id, command, task }) {
+    if (sessions.has(id)) { error(`Session "${id}" already exists`); return }
+
+    const isOpencode = command === 'opencode'
+    const cmd  = isOpencode ? 'opencode' : SHELL
+    const args = isOpencode ? [] : ['-l']
+
+    let p
+    try {
+      p = pty.spawn(cmd, args, {
+        name: 'xterm-256color',
+        cols: 220, rows: 50,
+        cwd: process.env.HOME ?? '/workspaces',
+        env: { ...process.env, TERM: 'xterm-256color' },
+      })
+    } catch (e) {
+      error(`Failed to start "${cmd}": ${e.message}`); return
     }
-    console.log('[mouse-relay] Client disconnected')
+
+    sessions.set(id, p)
+    send({ type: 'session_started', id })
+    console.log(`[relay] Session started: ${id} (${cmd})`)
+
+    p.onData((data) => {
+      send({ type: 'output', id, data })
+    })
+
+    p.onExit(({ exitCode }) => {
+      sessions.delete(id)
+      send({ type: 'session_exit', id, code: exitCode ?? null })
+      console.log(`[relay] Session exited: ${id} (code ${exitCode})`)
+    })
+
+    // Auto-send task to opencode after it initialises
+    if (isOpencode && task) {
+      setTimeout(() => {
+        try { p.write(task + '\r') } catch {}
+      }, 1200)
+    }
+  }
+
+  function handleInput({ id, data }) {
+    const p = sessions.get(id)
+    if (!p) { error(`Unknown session: ${id}`); return }
+    try { p.write(data) } catch {}
+  }
+
+  function handleResize({ id, cols, rows }) {
+    const p = sessions.get(id)
+    if (!p) return
+    try { p.resize(Math.max(10, cols), Math.max(2, rows)) } catch {}
+  }
+
+  function killSession(id) {
+    const p = sessions.get(id)
+    if (!p) return
+    try { p.kill() } catch {}
+    sessions.delete(id)
+    console.log(`[relay] Session killed: ${id}`)
+  }
+
+  // ── Cleanup on disconnect ───────────────────────────
+  ws.on('close', () => {
+    for (const [id, p] of sessions) {
+      try { p.kill() } catch {}
+      console.log(`[relay] Killed session on disconnect: ${id}`)
+    }
+    sessions.clear()
   })
 
-  ws.on('error', (err) => {
-    console.error('[mouse-relay] WebSocket error:', err.message)
-  })
+  ws.on('error', (e) => console.error('[relay] WebSocket error:', e.message))
 })
 
 server.listen(PORT, '0.0.0.0', () => {
-  console.log(`[mouse-relay] Listening on port ${PORT}`)
-  console.log(`[mouse-relay] GitHub will forward this as:`)
+  console.log(`[mouse-relay] v0.2.0 — port ${PORT}`)
+  console.log(`[mouse-relay] GitHub Codespaces forwards to:`)
   console.log(`[mouse-relay]   wss://{codespace-name}-${PORT}.app.github.dev`)
-  if (AUTO_START_OPENCODE) {
-    console.log(`[mouse-relay] Will auto-start opencode in each session`)
-    console.log(`[mouse-relay] Set MOUSE_AUTO_OPENCODE=0 to disable`)
-  }
 })
