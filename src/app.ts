@@ -4,7 +4,7 @@ import { BottomBar } from './components/BottomBar.ts'
 import { AuthGate } from './auth/AuthGate.ts'
 import { CodespacePicker } from './codespaces/CodespacePicker.ts'
 import { RelaySocket } from './terminal/RelaySocket.ts'
-import { getStoredToken, validateToken, clearAuth } from './auth/GitHubAuth.ts'
+import { getStoredToken, getValidAccessToken, clearAuth } from './auth/GitHubAuth.ts'
 import type { PickResult } from './codespaces/CodespacePicker.ts'
 
 export class App {
@@ -20,10 +20,12 @@ export class App {
   }
 
   private async boot() {
-    const token = getStoredToken()
-    if (!token) { this.showAuth(); return }
-    const valid = await validateToken(token)
-    if (!valid) { clearAuth(); this.showAuth(); return }
+    const token = await getValidAccessToken()
+    if (!token) {
+      if (getStoredToken()) clearAuth()
+      this.showAuth()
+      return
+    }
     this.showCodespacePicker(token)
   }
 
