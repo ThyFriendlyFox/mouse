@@ -13,6 +13,7 @@ html, body {
 /* Ayu Dark — https://github.com/dempfi/ayu */
 :root {
   --safe-area-top: env(safe-area-inset-top, 0px);
+  --safe-area-bottom: env(safe-area-inset-bottom, 0px);
   --bg: #0f1419;
   --panel: #151a1e;
   --surface: rgba(230, 225, 207, 0.045);
@@ -51,6 +52,7 @@ html, body {
   display: flex; flex-direction: column;
   position: relative; overflow: hidden;
   padding-top: var(--safe-area-top);
+  padding-bottom: var(--safe-area-bottom);
 }
 
 @media (min-width: 540px) {
@@ -616,7 +618,9 @@ html, body {
 
 /* ── Toast ─────────────────────────────────────────── */
 .toast {
-  position: absolute; bottom: 90px; left: 50%; transform: translateX(-50%) translateY(8px);
+  position: absolute;
+  bottom: calc(90px + var(--safe-area-bottom));
+  left: 50%; transform: translateX(-50%) translateY(8px);
   background: rgba(30,30,50,0.95); border: 1px solid var(--border-bright);
   color: var(--text); font-size: 12px; padding: 8px 16px;
   border-radius: 20px; pointer-events: none;

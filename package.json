@@ -11,6 +11,7 @@
     "electron:dev": "concurrently -k \"vite\" \"wait-on http://127.0.0.1:5173 && electron .\"",
     "electron:dist": "npm run build && electron-builder",
     "cap:sync": "npm run build && npx cap sync",
+    "cap:ios:sim": "npm run cap:sync && npx cap run ios --no-sync --target-name \"iPhone 17 Pro\" --target-name-sdk-version 26.2",
     "cap:open:ios": "npx cap open ios",
     "cap:open:android": "npx cap open android"
   },
