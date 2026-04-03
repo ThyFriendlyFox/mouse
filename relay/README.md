@@ -1,6 +1,8 @@
 # @mouse-app/relay
 
-WebSocket **PTY relay** for **[Mouse](https://github.com/mouse-app)**. Run it **inside a GitHub Codespace** so the mobile/desktop app can open terminals and agent sessions over forwarded ports.
+WebSocket **PTY relay** for **[Mouse](https://github.com/reagent-systems/mouse)** — the mobile / desktop client for coding with AI in **GitHub Codespaces**. Run this package **inside a Codespace** so Mouse can open terminals and agent sessions over GitHub’s forwarded ports (`*.app.github.dev`).
+
+**Source:** this npm package is developed in the Mouse monorepo under [`relay/`](https://github.com/reagent-systems/mouse/tree/main/relay).
 
 ## Requirements
 
@@ -27,6 +29,10 @@ mouse-relay
 The server listens on **`0.0.0.0`** so Codespaces port forwarding can reach it. Mouse expects the relay on the forwarded WebSocket URL:
 
 `wss://{codespace-name}-{port}.app.github.dev`
+
+### Auto-start (recommended)
+
+To avoid running `npx` manually after every resume, merge the **devcontainer** snippet from the Mouse app (or copy from [relay auto-start config](https://github.com/reagent-systems/mouse/blob/main/.devcontainer/devcontainer.json)) into your repo’s `.devcontainer/devcontainer.json`.
 
 ## Environment
 
@@ -56,7 +62,7 @@ GitHub `/user` is used to validate the token. On success the server sends `{ "ty
 - `kill_session` — end a session
 - `session_exit` — server notifies exit code
 
-Full message shapes are documented in the source header of `mouse-relay.mjs`.
+Full message shapes are documented in the source header of `mouse-relay.mjs` in the repo.
 
 ## Port already in use (`EADDRINUSE`)
 
@@ -85,4 +91,4 @@ The **Mouse** client expects **port 2222** in the Codespace URL (`*-2222.app.git
 
 ## License
 
-See the parent Mouse repository for license terms.
+See the [Mouse repository](https://github.com/reagent-systems/mouse).

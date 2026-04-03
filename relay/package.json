@@ -1,7 +1,15 @@
 {
   "name": "@mouse-app/relay",
-  "version": "0.1.3",
+  "version": "0.1.4",
   "description": "WebSocket PTY relay for Mouse — runs inside a GitHub Codespace",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/reagent-systems/mouse.git"
+  },
+  "homepage": "https://github.com/reagent-systems/mouse/tree/main/relay",
+  "bugs": {
+    "url": "https://github.com/reagent-systems/mouse/issues"
+  },
   "type": "module",
   "files": [
     "mouse-relay.mjs",
