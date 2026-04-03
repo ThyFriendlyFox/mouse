@@ -42,6 +42,31 @@ const server = createServer((req, res) => {
 
 const wss = new WebSocketServer({ server })
 
+/** `ws` forwards HTTP listen errors here; without a listener they become an unhandled rejection on wss. */
+let listenErrorHandled = false
+function handleListenError(err) {
+  if (listenErrorHandled) return
+  if (err && err.code === 'EADDRINUSE') {
+    listenErrorHandled = true
+    console.error(`[mouse-relay] Port ${PORT} is already in use (EADDRINUSE).`)
+    console.error('[mouse-relay] Stop the process that is listening, then try again. Examples:')
+    console.error(`[mouse-relay]   ss -tlnp | grep :${PORT}`)
+    console.error('[mouse-relay]   pkill -f mouse-relay   # or: pkill -f "node.*2222"')
+    console.error(`[mouse-relay]   fuser -v -k ${PORT}/tcp  # may need: sudo fuser -k ${PORT}/tcp`)
+    console.error(`[mouse-relay]   lsof -i :${PORT}`)
+    if (PORT === 2222) {
+      console.error('[mouse-relay] Mouse expects port 2222 in the Codespace URL; change MOUSE_RELAY_PORT only if you change Mouse too.')
+    }
+    process.exit(1)
+    return
+  }
+  listenErrorHandled = true
+  console.error('[mouse-relay] Server error:', err)
+  process.exit(1)
+}
+server.on('error', handleListenError)
+wss.on('error', handleListenError)
+
 wss.on('connection', (ws) => {
   /** @type {Map<string, import('node-pty').IPty>} */
   const sessions = new Map()

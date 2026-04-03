@@ -58,6 +58,26 @@ GitHub `/user` is used to validate the token. On success the server sends `{ "ty
 
 Full message shapes are documented in the source header of `mouse-relay.mjs`.
 
+## Port already in use (`EADDRINUSE`)
+
+If **`listen EADDRINUSE … :2222`** appears, something else (often a **previous relay** in another terminal) is bound to that port.
+
+See what is bound, then stop it:
+
+```bash
+ss -tlnp | grep ':2222'
+# or: lsof -i :2222
+```
+
+Then kill that PID, or try:
+
+```bash
+pkill -f mouse-relay
+fuser -vik 2222/tcp    # -v shows PIDs; use sudo if permission denied
+```
+
+The **Mouse** client expects **port 2222** in the Codespace URL (`*-2222.app.github.dev`). Only set **`MOUSE_RELAY_PORT`** to something else if you change **Mouse** to match.
+
 ## Security notes
 
 - The relay validates tokens with **GitHub’s API** but does not store them.
