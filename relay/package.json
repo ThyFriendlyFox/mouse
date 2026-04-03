@@ -3,8 +3,12 @@
   "version": "0.1.0",
   "description": "WebSocket PTY relay for Mouse — runs inside a GitHub Codespace",
   "type": "module",
+  "files": [
+    "mouse-relay.mjs"
+  ],
   "bin": {
-    "mouse-relay": "./mouse-relay.mjs"
+    "relay": "mouse-relay.mjs",
+    "mouse-relay": "mouse-relay.mjs"
   },
   "dependencies": {
     "node-pty": "^1.0.0",
